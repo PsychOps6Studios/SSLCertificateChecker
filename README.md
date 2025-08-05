@@ -23,3 +23,19 @@ Network connectivity to the target domains
 Appropriate permissions to make outbound connections
 
 The script will work on Windows, Linux, and macOS with PowerShell Core.
+
+Basic Usage:
+.\SSLCertificateChecker.ps1 -Domains "example.com"
+
+Using Domains File:
+.\SSLCertificateChecker.ps1 -DomainsFile "C:\path\to\domains.txt"
+
+Check SMTP certificates:
+.\SSLCertificateChecker.ps1 -Domains "example.com" -SMTP
+
+Change warning threshold (default 30 days):
+.\SSLCertificateChecker.ps1 -Domains "example.com" -DaysWarning 60
+
+Export results to CSV:
+.\SSLCertificateChecker.ps1 -Domains "example.com" -OutputCSV "C:\results.csv"
+
