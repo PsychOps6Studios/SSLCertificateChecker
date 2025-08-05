@@ -1,0 +1,177 @@
+<#
+.SYNOPSIS
+    SSL Certificate Checker - Checks SSL certificate expiration dates for multiple domains.
+.DESCRIPTION
+    This script checks SSL certificates for a list of domains and reports their expiration status.
+    It can check certificates for both HTTPS and SMTP services.
+.NOTES
+    File Name      : SSLCertificateChecker.ps1
+    Author         : Your Name
+    Prerequisite   : PowerShell 5.1 or later
+    Version        : 1.0
+.EXAMPLE
+    .\SSLCertificateChecker.ps1 -Domains "example.com,google.com" -DaysWarning 30
+#>
+
+param (
+    # Path to a text file containing domains (one per line)
+    [string]$DomainsFile,
+    
+    # Comma-separated list of domains to check
+    [string]$Domains,
+    
+    # Number of days before expiration to warn about
+    [int]$DaysWarning = 30,
+    
+    # Check SMTP certificates instead of HTTPS
+    [switch]$SMTP,
+    
+    # Output file path for CSV report
+    [string]$OutputCSV
+)
+
+# Function to check SSL certificate
+function Get-SSLCertificate {
+    param (
+        [string]$Domain,
+        [int]$Port = 443
+    )
+
+    try {
+        $tcpSocket = New-Object Net.Sockets.TcpClient
+        $tcpSocket.Connect($Domain, $Port)
+        
+        if ($tcpSocket.Connected) {
+            $sslStream = New-Object System.Net.Security.SslStream($tcpSocket.GetStream(), $false, {
+                param($sender, $certificate, $chain, $sslPolicyErrors) $true
+            })
+            
+            try {
+                $sslStream.AuthenticateAsClient($Domain)
+                $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]$sslStream.RemoteCertificate
+                
+                $result = [PSCustomObject]@{
+                    Domain          = $Domain
+                    Port            = $Port
+                    Issuer          = $certificate.Issuer
+                    Subject         = $certificate.Subject
+                    NotBefore       = $certificate.NotBefore
+                    NotAfter        = $certificate.NotAfter
+                    ExpiresInDays   = ($certificate.NotAfter - (Get-Date)).Days
+                    Status          = ""
+                    Thumbprint      = $certificate.Thumbprint
+                    SerialNumber    = $certificate.SerialNumber
+                    IsValid         = $certificate.NotAfter -gt (Get-Date)
+                }
+                
+                if ($certificate.NotAfter -lt (Get-Date)) {
+                    $result.Status = "Expired"
+                }
+                elseif (($certificate.NotAfter - (Get-Date)).Days -le $DaysWarning) {
+                    $result.Status = "Expiring Soon"
+                }
+                else {
+                    $result.Status = "Valid"
+                }
+                
+                return $result
+            }
+            finally {
+                $sslStream.Close()
+                $tcpSocket.Close()
+            }
+        }
+    }
+    catch {
+        return [PSCustomObject]@{
+            Domain          = $Domain
+            Port            = $Port
+            Issuer          = "Error"
+            Subject         = "Error"
+            NotBefore       = $null
+            NotAfter        = $null
+            ExpiresInDays   = $null
+            Status          = "Connection Failed"
+            Thumbprint      = $null
+            SerialNumber    = $null
+            IsValid         = $false
+        }
+    }
+}
+
+# Main script execution
+try {
+    # Prepare domain list
+    $domainList = @()
+    
+    if ($DomainsFile -and (Test-Path $DomainsFile)) {
+        $domainList += Get-Content $DomainsFile | Where-Object { $_ -match "\S" }
+    }
+    
+    if ($Domains) {
+        $domainList += $Domains -split "," | ForEach-Object { $_.Trim() }
+    }
+    
+    $domainList = $domainList | Select-Object -Unique | Where-Object { $_ -ne "" }
+    
+    if ($domainList.Count -eq 0) {
+        Write-Host "No domains specified. Please use -Domains or -DomainsFile parameter." -ForegroundColor Red
+        exit 1
+    }
+    
+    Write-Host "Checking SSL certificates for $($domainList.Count) domains..." -ForegroundColor Cyan
+    
+    # Check certificates
+    $results = @()
+    $port = if ($SMTP) { 25 } else { 443 }
+    
+    foreach ($domain in $domainList) {
+        Write-Host "Checking $domain..." -NoNewline
+        $result = Get-SSLCertificate -Domain $domain -Port $port
+        
+        if ($result.Status -eq "Valid") {
+            Write-Host " Valid (expires in $($result.ExpiresInDays) days on $($result.NotAfter.ToString('yyyy-MM-dd')))" -ForegroundColor Green
+        }
+        elseif ($result.Status -eq "Expiring Soon") {
+            Write-Host " WARNING: Expiring soon (in $($result.ExpiresInDays) days on $($result.NotAfter.ToString('yyyy-MM-dd')))" -ForegroundColor Yellow
+        }
+        elseif ($result.Status -eq "Expired") {
+            Write-Host " ERROR: Certificate expired on $($result.NotAfter.ToString('yyyy-MM-dd'))" -ForegroundColor Red
+        }
+        else {
+            Write-Host " ERROR: $($result.Status)" -ForegroundColor Red
+        }
+        
+        $results += $result
+    }
+    
+    # Display summary
+    $expiredCount = ($results | Where-Object { $_.Status -eq "Expired" }).Count
+    $expiringCount = ($results | Where-Object { $_.Status -eq "Expiring Soon" }).Count
+    $validCount = ($results | Where-Object { $_.Status -eq "Valid" }).Count
+    $failedCount = ($results | Where-Object { $_.Status -eq "Connection Failed" }).Count
+    
+    Write-Host "`nSummary:" -ForegroundColor Cyan
+    Write-Host "  Valid certificates: $validCount" -ForegroundColor Green
+    Write-Host "  Expiring soon (<$DaysWarning days): $expiringCount" -ForegroundColor Yellow
+    Write-Host "  Expired certificates: $expiredCount" -ForegroundColor Red
+    Write-Host "  Connection failures: $failedCount" -ForegroundColor Magenta
+    
+    # Export to CSV if requested
+    if ($OutputCSV) {
+        try {
+            $results | Export-Csv -Path $OutputCSV -NoTypeInformation
+            Write-Host "`nResults exported to $OutputCSV" -ForegroundColor Cyan
+        }
+        catch {
+            Write-Host "Error exporting to CSV: $_" -ForegroundColor Red
+        }
+    }
+    
+    # Return results for pipeline
+    return $results
+}
+catch {
+    Write-Host "Error: $_" -ForegroundColor Red
+    exit 1
+}
